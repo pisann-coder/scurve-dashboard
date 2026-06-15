@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>S-Curve Project Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%236C8EEF'/><text x='50%25' y='55%25' dominant-baseline='middle' text-anchor='middle' fill='white' font-size='18' font-weight='bold'>S</text></svg>" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.9/babel.min.js"></script>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html,body,#root{height:100%;width:100%}
+    body{font-family:'Inter','Noto Sans Thai',system-ui,sans-serif;background:#0F1117;color:#E8ECF4;-webkit-font-smoothing:antialiased}
+    input[type=number]::-webkit-inner-spin-button{opacity:1}
+    ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#252A3A;border-radius:3px}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    #boot-err{display:none;position:fixed;inset:0;background:#0F1117;align-items:center;justify-content:center;flex-direction:column;gap:12px;z-index:9999;padding:20px;color:#F87171;font-size:14px;text-align:center}
+  </style>
+</head>
+<body>
+  <div id="boot-err"></div>
+  <div id="root"></div>
+  <script>
+    (function(){
+      var m=[];
+      if(typeof React==='undefined')m.push('React');
+      if(typeof ReactDOM==='undefined')m.push('ReactDOM');
+      if(typeof Chart==='undefined')m.push('Chart.js');
+      if(typeof Babel==='undefined')m.push('Babel');
+      if(m.length){
+        var e=document.getElementById('boot-err');
+        e.style.display='flex';
+        e.innerHTML='<div style="font-size:18px;font-weight:700">⚠ โหลด Library ไม่สำเร็จ</div><div style="color:#6B7A99">ไม่สามารถโหลด: <b style="color:#E8ECF4">'+m.join(', ')+'</b><br><br>กด Ctrl+Shift+R เพื่อ Hard Reload<br>หรือตรวจสอบการเชื่อมต่ออินเทอร์เน็ต</div>';
+      }
+    })();
+  </script>
+
+  <script type="text/babel" id="app-script">
+    const {useState,useEffect,useCallback,useRef} = React;
+
+    const C={
+      bg:"#0F1117",card:"#181B25",nav:"#13151E",
+      primary:"#6C8EEF",primaryDim:"rgba(108,142,239,.12)",
+      planned:"#818CF8",actual:"#34D399",
+      behind:"#FBBF24",danger:"#F87171",
+      text:"#E8ECF4",textMuted:"#6B7A99",
+      border:"#252A3A",borderLight:"#2D3348",
+      accent:"#A78BFA",inputBg:"#1A1D2A",
+      glow:"rgba(108,142,239,.25)",
+    };
+    const STORAGE_KEY="scurve_api_url";
+    const pct=n=>(n!=null?n.toFixed(1)+"%":"–");
+
+    function getStats(sc){
+      const last=[...sc].reverse().find(d=>d.actual!=null);
+      if(!last)return{currentActual:0,currentPlanned:0,deviation:0,progressIndex:-1};
+      const idx=sc.findIndex(d=>d.monthIndex===last.monthIndex);
+      return{currentActual:last.actual,currentPlanned:sc[idx]?.planned??0,deviation:last.actual-(sc[idx]?.planned??0),progressIndex:idx};
+    }
+
+    const THAI_MONTHS=["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+    function fmtDate(raw){
+      if(!raw||raw==="–")return"–";
+      try{
+        const d=new Date(raw);
+        if(isNaN(d))return String(raw);
+        const day=d.getDate();
+        const mon=THAI_MONTHS[d.getMonth()];
+        const yr=d.getFullYear()+543;
+        return day+" "+mon+" "+yr;
+      }catch{return String(raw);}
+    }
+    function fmtBudget(n){
+      if(!n||n===0)return"–";
+      return"฿"+Number(n).toLocaleString("th-TH");
+    }
+
+    function Badge({deviation}){
+      const ok=deviation>=0;
+      return(<span style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 10px",borderRadius:20,fontSize:11,fontWeight:600,background:ok?"rgba(52,211,153,.1)":"rgba(251,191,36,.1)",color:ok?C.actual:C.behind,border:"1px solid "+(ok?"rgba(52,211,153,.2)":"rgba(251,191,36,.2)")}}>
+        <span style={{fontSize:7}}>●</span>{ok?"ตามแผน":"ช้า "+Math.abs(deviation).toFixed(1)+"%"}
+      </span>);
+    }
+
+    /* ═══ Chart.js S-Curve Component ═══ */
+    function SCurveChart({scurveData,height}){
+      const canvasRef=useRef(null);
+      const chartRef=useRef(null);
+
+      useEffect(()=>{
+        if(!canvasRef.current)return;
+        if(chartRef.current)chartRef.current.destroy();
+
+        const labels=scurveData.map(d=>d.month);
+        const planned=scurveData.map(d=>d.planned);
+        const actual=scurveData.map(d=>d.actual);
+
+        chartRef.current=new Chart(canvasRef.current,{
+          type:'line',
+          data:{
+            labels,
+            datasets:[
+              {
+                label:'แผนงาน',
+                data:planned,
+                borderColor:C.planned,
+                backgroundColor:C.planned+'20',
+                borderWidth:2.5,
+                pointRadius:4,
+                pointBackgroundColor:C.planned,
+                pointBorderWidth:0,
+                pointHoverRadius:6,
+                pointHoverBorderWidth:2,
+                pointHoverBorderColor:C.card,
+                fill:true,
+                tension:0.35,
+              },
+              {
+                label:'ผลงานจริง',
+                data:actual,
+                borderColor:C.actual,
+                backgroundColor:C.actual+'25',
+                borderWidth:2.5,
+                pointRadius:4,
+                pointBackgroundColor:C.actual,
+                pointBorderWidth:0,
+                pointHoverRadius:6,
+                pointHoverBorderWidth:2,
+                pointHoverBorderColor:C.card,
+                fill:true,
+                tension:0.35,
+                spanGaps:false,
+              }
+            ]
+          },
+          options:{
+            responsive:true,
+            maintainAspectRatio:false,
+            interaction:{mode:'index',intersect:false},
+            plugins:{
+              legend:{
+                position:'top',align:'end',
+                labels:{color:C.textMuted,font:{size:12,family:'Inter'},boxWidth:12,boxHeight:12,borderRadius:6,useBorderRadius:true,padding:16}
+              },
+              tooltip:{
+                backgroundColor:'#1A1D2A',
+                titleColor:C.textMuted,titleFont:{size:12,family:'Inter'},
+                bodyColor:C.text,bodyFont:{size:13,family:'Inter'},
+                borderColor:C.border,borderWidth:1,
+                padding:12,cornerRadius:8,
+                displayColors:true,boxPadding:4,
+                callbacks:{
+                  label:function(ctx){return ctx.dataset.label+': '+(ctx.parsed.y!=null?ctx.parsed.y+'%':'–');},
+                  afterBody:function(items){
+                    if(items.length>=2&&items[0].parsed.y!=null&&items[1].parsed.y!=null){
+                      const diff=items[1].parsed.y-items[0].parsed.y;
+                      return['ส่วนต่าง: '+(diff>=0?'+':'')+diff.toFixed(1)+'%'];
+                    }return[];
+                  }
+                }
+              }
+            },
+            scales:{
+              x:{
+                grid:{color:C.border,drawBorder:false},
+                ticks:{color:C.textMuted,font:{size:12,family:'Inter'}}
+              },
+              y:{
+                min:0,max:100,
+                grid:{color:C.border,drawBorder:false},
+                ticks:{color:C.textMuted,font:{size:12,family:'Inter'},callback:v=>v+'%',stepSize:20}
+              }
+            }
+          }
+        });
+
+        return()=>{if(chartRef.current)chartRef.current.destroy();};
+      },[scurveData]);
+
+      return <div style={{position:'relative',height:height||360}}><canvas ref={canvasRef}/></div>;
+    }
+
+    /* ═══ Reusable Components ═══ */
+    function Btn({children,onClick,secondary,accent,disabled}){
+      let st={padding:"9px 20px",borderRadius:8,fontSize:13,fontWeight:600,cursor:disabled?"default":"pointer",border:"none",opacity:disabled?0.5:1};
+      if(secondary)Object.assign(st,{background:"transparent",border:"1px solid "+C.border,color:C.textMuted});
+      else if(accent)Object.assign(st,{background:C.actual,color:"#fff"});
+      else Object.assign(st,{background:"linear-gradient(135deg,"+C.primary+","+C.accent+")",color:"#fff",boxShadow:"0 2px 8px "+C.glow});
+      return <button onClick={onClick} disabled={disabled} style={st}>{children}</button>;
+    }
+
+    function MonthCard({task:t,onChange,field}){
+      const isActual=field==="actual";
+      const dev=t.actual!=null&&isActual?t.actual-t.planned:null;
+      return(
+        <div style={{border:"1px solid "+C.border,borderRadius:10,padding:14,background:C.bg}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <span style={{fontWeight:600,fontSize:14}}>{t.month}</span>
+            {isActual&&<span style={{fontSize:12,color:C.textMuted}}>แผน: {t.planned}%</span>}
+            {!isActual&&t.actual!=null&&<span style={{fontSize:12,color:C.textMuted}}>จริง: {t.actual}%</span>}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <input type="number" min={0} max={100} step={0.1} value={t[field]!=null?t[field]:""} onChange={e=>onChange(e.target.value)} placeholder="–"
+              style={{flex:1,padding:"8px 12px",border:"1.5px solid "+(t[field]!=null?C.primary:C.border),borderRadius:8,fontSize:16,fontWeight:600,textAlign:"center",outline:"none",background:C.inputBg,color:C.text}}/>
+            <span style={{fontSize:14,color:C.textMuted}}>%</span>
+          </div>
+          {dev!=null&&(<div style={{marginTop:8,fontSize:12,fontWeight:600,textAlign:"center",color:dev>=0?C.actual:C.behind}}>
+            {dev>=0?"▲":"▼"} {Math.abs(dev).toFixed(1)}% {dev>=0?"เร็วกว่าแผน":"ช้ากว่าแผน"}</div>)}
+        </div>);
+    }
+
+    function PageHeader({title,subtitle,onSave,onCancel,saving,saveLabel}){
+      return(<div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:24,flexWrap:"wrap",gap:12}}>
+        <div><h1 style={{margin:0,fontSize:22,fontWeight:700}}>{title}</h1>
+          {subtitle&&<div style={{fontSize:13,color:C.textMuted,marginTop:4}}>{subtitle}</div>}</div>
+        <div style={{display:"flex",gap:10}}>
+          <Btn onClick={onCancel} secondary>ยกเลิก</Btn>
+          <Btn onClick={onSave} disabled={saving} accent>{saving?"กำลังบันทึก...":saveLabel}</Btn>
+        </div></div>);
+    }
+
+    /* ═══ Setup View ═══ */
+    function SetupView({apiUrl,onConnect,loading,error}){
+      const[url,setUrl]=useState(apiUrl);
+      return(
+        <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+          <div style={{background:C.card,borderRadius:16,padding:36,maxWidth:480,width:"100%",border:"1px solid "+C.border,boxShadow:"0 0 60px "+C.glow}}>
+            <div style={{textAlign:"center",marginBottom:28}}>
+              <div style={{width:56,height:56,borderRadius:14,margin:"0 auto 16px",background:"linear-gradient(135deg,"+C.primary+","+C.accent+")",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,fontWeight:700,color:"#fff"}}>S</div>
+              <h1 style={{margin:"0 0 6px",fontSize:22,fontWeight:700}}>S-Curve Dashboard</h1>
+              <p style={{margin:0,fontSize:13,color:C.textMuted}}>เชื่อมต่อ Google Sheets เพื่อเริ่มใช้งาน</p>
+            </div>
+            <div style={{marginBottom:20}}>
+              <label style={{display:"block",fontSize:12,fontWeight:600,color:C.textMuted,marginBottom:8,textTransform:"uppercase",letterSpacing:0.5}}>Google Apps Script URL</label>
+              <input type="url" value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/.../exec"
+                style={{width:"100%",padding:"12px 14px",background:C.inputBg,border:"1.5px solid "+C.border,borderRadius:10,fontSize:13,color:C.text,outline:"none",boxSizing:"border-box"}}/>
+            </div>
+            {error&&(<div style={{padding:"10px 14px",borderRadius:8,marginBottom:16,background:"rgba(248,113,113,.1)",border:"1px solid rgba(248,113,113,.2)",color:C.danger,fontSize:13}}>✕ {error}</div>)}
+            <button onClick={()=>onConnect(url)} disabled={!url.trim()||loading}
+              style={{width:"100%",padding:"12px",background:url.trim()?"linear-gradient(135deg,"+C.primary+","+C.accent+")":C.border,color:"#fff",border:"none",borderRadius:10,fontSize:14,fontWeight:600,cursor:url.trim()&&!loading?"pointer":"default",opacity:loading?0.6:1}}>
+              {loading?"กำลังเชื่อมต่อ...":"เชื่อมต่อ"}</button>
+            <div style={{marginTop:24,padding:16,background:C.bg,borderRadius:10,border:"1px solid "+C.border}}>
+              <div style={{fontSize:12,fontWeight:600,marginBottom:8,color:C.textMuted}}>วิธีตั้งค่า</div>
+              <ol style={{margin:0,padding:"0 0 0 18px",fontSize:12,color:C.textMuted,lineHeight:2}}>
+                <li>สร้าง Google Sheet พร้อม Sheet: PROJECTS, SCURVE, CONFIG</li>
+                <li>ไปที่ Extensions → Apps Script แล้ววางโค้ด Backend</li>
+                <li>Deploy → New deployment → Web app (Anyone)</li>
+                <li>คัดลอก URL มาวางด้านบน แล้วกดเชื่อมต่อ</li>
+              </ol>
+            </div>
+          </div>
+        </div>);
+    }
+
+    /* ═══ Dashboard View ═══ */
+    function DashboardView({project,scurveData,onUpdate,onEditPlan}){
+      const stats=getStats(scurveData);
+      return(<div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:24,flexWrap:"wrap",gap:12}}>
+          <div>
+            <h1 style={{margin:0,fontSize:22,fontWeight:700,lineHeight:1.3}}>{project.id} {project.name}</h1>
+            <div style={{fontSize:13,color:C.textMuted,marginTop:4}}>{project.client}<span style={{margin:"0 8px",opacity:0.3}}>|</span>{fmtDate(project.startDate)} → {fmtDate(project.endDate)}</div>
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <button onClick={onEditPlan} style={{padding:"9px 16px",background:"transparent",border:"1px solid "+C.border,borderRadius:8,color:C.textMuted,cursor:"pointer",fontSize:13}}>แก้ไขแผนงาน</button>
+            <button onClick={onUpdate} style={{padding:"9px 20px",background:"linear-gradient(135deg,"+C.primary+","+C.accent+")",color:"#fff",border:"none",borderRadius:8,fontSize:13,fontWeight:600,cursor:"pointer"}}>อัปเดตผลงานจริง</button>
+          </div>
+        </div>
+
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:12,marginBottom:24}}>
+          {[{label:"แผนงาน",value:pct(stats.currentPlanned),color:C.planned,icon:"◎"},
+            {label:"ผลงานจริง",value:pct(stats.currentActual),color:C.actual,icon:"◉"},
+            {label:"ส่วนต่าง",value:(stats.deviation>=0?"+":"")+stats.deviation.toFixed(1)+"%",color:stats.deviation>=0?C.actual:C.behind,icon:stats.deviation>=0?"▲":"▼"},
+            {label:"งบประมาณ",value:fmtBudget(project.budget),color:C.accent,icon:"◈"},
+          ].map((c,i)=>(
+            <div key={i} style={{background:C.card,borderRadius:12,padding:"16px 18px",border:"1px solid "+C.border,borderTop:"2px solid "+c.color}}>
+              <div style={{fontSize:10,color:C.textMuted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:8}}><span style={{marginRight:5,color:c.color}}>{c.icon}</span>{c.label}</div>
+              <div style={{fontSize:c.label==="งบประมาณ"?18:24,fontWeight:700,letterSpacing:-0.5,color:c.color}}>{c.value}</div>
+            </div>))}
+        </div>
+
+        <div style={{background:C.card,borderRadius:14,padding:"22px 18px 14px",border:"1px solid "+C.border,marginBottom:24}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+            <div><h2 style={{margin:0,fontSize:16,fontWeight:700}}>S-Curve</h2>
+              <div style={{fontSize:12,color:C.textMuted,marginTop:2}}>แผนงานสะสม vs ผลงานจริง (%)</div></div>
+            <Badge deviation={stats.deviation}/>
+          </div>
+          <SCurveChart scurveData={scurveData} height={360}/>
+        </div>
+
+        <div style={{background:C.card,borderRadius:14,overflow:"hidden",border:"1px solid "+C.border}}>
+          <div style={{padding:"14px 18px",borderBottom:"1px solid "+C.border}}>
+            <h2 style={{margin:0,fontSize:15,fontWeight:700}}>รายละเอียดรายเดือน</h2></div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr>
+                {["เดือน","แผนงาน (%)","ผลงานจริง (%)","ส่วนต่าง","สถานะ"].map(h=>(
+                  <th key={h} style={{padding:"10px 16px",textAlign:"left",fontWeight:600,color:C.textMuted,fontSize:10,textTransform:"uppercase",letterSpacing:0.5,borderBottom:"1px solid "+C.border,background:C.bg}}>{h}</th>))}
+              </tr></thead>
+              <tbody>
+                {scurveData.map((t,i)=>{const dev=t.actual!=null?t.actual-t.planned:null;return(
+                  <tr key={i} style={{borderBottom:"1px solid "+C.border}}>
+                    <td style={{padding:"10px 16px",fontWeight:500}}>{t.month}</td>
+                    <td style={{padding:"10px 16px",color:C.planned}}>{t.planned}</td>
+                    <td style={{padding:"10px 16px",fontWeight:t.actual!=null?600:400,color:t.actual!=null?C.actual:C.textMuted}}>{t.actual!=null?t.actual:"–"}</td>
+                    <td style={{padding:"10px 16px",fontWeight:600,color:dev==null?C.textMuted:dev>=0?C.actual:C.behind}}>{dev!=null?(dev>=0?"+":"")+dev.toFixed(1):"–"}</td>
+                    <td style={{padding:"10px 16px"}}>{t.actual!=null?<Badge deviation={dev}/>:<span style={{fontSize:11,color:C.textMuted}}>รอข้อมูล</span>}</td>
+                  </tr>);})}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>);
+    }
+
+    /* ═══ Update / Edit / Add Views ═══ */
+    function UpdateView({project,scurveData,onSave,onCancel}){
+      const[tasks,setTasks]=useState(()=>JSON.parse(JSON.stringify(scurveData)));
+      const[saving,setSaving]=useState(false);
+      const hc=(idx,v)=>{const u=[...tasks];const n=v===""?null:Math.min(100,Math.max(0,parseFloat(v)));u[idx]={...u[idx],actual:isNaN(n)?null:n};setTasks(u);};
+      const hs=async()=>{setSaving(true);await onSave(tasks.map(t=>({monthIndex:t.monthIndex,actual:t.actual})));setSaving(false);};
+      return(<div><PageHeader title="อัปเดตผลงานจริง" subtitle={project.id+" "+project.name} onSave={hs} onCancel={onCancel} saving={saving} saveLabel="บันทึกผลงาน"/>
+        <div style={{background:C.card,borderRadius:14,border:"1px solid "+C.border,padding:20}}>
+          <p style={{margin:"0 0 16px",fontSize:13,color:C.textMuted}}>กรอก % ผลงานจริงสะสม (0–100) — ข้อมูลจะบันทึกลง Google Sheets โดยตรง</p>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}}>
+            {tasks.map((t,i)=><MonthCard key={i} task={t} onChange={v=>hc(i,v)} field="actual"/>)}</div></div></div>);
+    }
+
+    function EditPlanView({project,scurveData,onSave,onCancel}){
+      const[tasks,setTasks]=useState(()=>JSON.parse(JSON.stringify(scurveData)));
+      const[saving,setSaving]=useState(false);
+      const hc=(idx,v)=>{const u=[...tasks];u[idx]={...u[idx],planned:Math.min(100,Math.max(0,parseFloat(v)||0))};setTasks(u);};
+      const hs=async()=>{setSaving(true);await onSave(tasks.map(t=>({monthIndex:t.monthIndex,planned:t.planned})));setSaving(false);};
+      return(<div><PageHeader title="แก้ไขแผนงาน (Planned)" subtitle={project.id+" "+project.name} onSave={hs} onCancel={onCancel} saving={saving} saveLabel="บันทึกแผนงาน"/>
+        <div style={{background:C.card,borderRadius:14,border:"1px solid "+C.border,padding:20}}>
+          <p style={{margin:"0 0 16px",fontSize:13,color:C.textMuted}}>แก้ไข % แผนงานสะสมในแต่ละเดือน</p>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}}>
+            {tasks.map((t,i)=><MonthCard key={i} task={t} onChange={v=>hc(i,v)} field="planned"/>)}</div></div></div>);
+    }
+
+    function AddProjectView({onSave,onCancel}){
+      const[form,setForm]=useState({name:"",client:"",startDate:"",endDate:"",budget:"",months:"12"});
+      const[saving,setSaving]=useState(false);
+      const THAI=["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+      const submit=async()=>{
+        if(!form.name||!form.months)return;setSaving(true);
+        const id="PRJ-"+Date.now().toString().slice(-6);
+        const si=form.startDate?new Date(form.startDate).getMonth():0;
+        const n=Math.min(parseInt(form.months),24);
+        const sc=Array.from({length:n},(_,i)=>{const x=(i+1)/n;const p=i===n-1?100:Math.round(100/(1+Math.exp(-10*(x-0.5)))*10)/10;return{monthIndex:i+1,month:THAI[(si+i)%12],planned:p,actual:null};});
+        await onSave({id,name:form.name,client:form.client||"–",startDate:form.startDate||"–",endDate:form.endDate||"–",budget:parseFloat(form.budget)||0,status:"active"},sc);
+        setSaving(false);};
+      const F=(label,k,type,rest)=>(<div style={{marginBottom:16}}>
+        <label style={{display:"block",fontSize:11,fontWeight:600,color:C.textMuted,marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>{label}</label>
+        <input type={type||"text"} value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}
+          style={{width:"100%",padding:"10px 14px",background:C.inputBg,border:"1.5px solid "+C.border,borderRadius:8,fontSize:14,color:C.text,outline:"none",boxSizing:"border-box"}} {...rest}/></div>);
+      return(<div><h1 style={{margin:"0 0 24px",fontSize:22,fontWeight:700}}>เพิ่มโครงการใหม่</h1>
+        <div style={{background:C.card,borderRadius:14,padding:28,maxWidth:520,border:"1px solid "+C.border}}>
+          {F("ชื่อโครงการ *","name")}{F("ผู้ว่าจ้าง / ลูกค้า","client")}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>{F("วันเริ่มต้น","startDate","date")}{F("วันสิ้นสุด","endDate","date")}</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>{F("งบประมาณ (บาท)","budget","number")}{F("จำนวนเดือน","months","number")}</div>
+          <p style={{fontSize:12,color:C.textMuted,margin:"0 0 20px"}}>สร้างค่า Planned แบบ S-Curve อัตโนมัติ — แก้ไขภายหลังได้จากหน้า "แก้ไขแผนงาน"</p>
+          <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+            <Btn onClick={onCancel} secondary>ยกเลิก</Btn>
+            <Btn onClick={submit} disabled={!form.name||saving}>{saving?"กำลังบันทึก...":"สร้างโครงการ"}</Btn>
+          </div></div></div>);
+    }
+
+    /* ═══ Main App ═══ */
+    function App(){
+      const[apiUrl,setApiUrl]=useState(()=>{try{return localStorage.getItem(STORAGE_KEY)||"";}catch{return"";}});
+      const[connected,setConnected]=useState(false);
+      const[projects,setProjects]=useState([]);
+      const[scurveMap,setScurveMap]=useState({});
+      const[selectedId,setSelectedId]=useState(null);
+      const[view,setView]=useState("dashboard");
+      const[loading,setLoading]=useState(false);
+      const[error,setError]=useState(null);
+      const[toast,setToast]=useState(null);
+      const[sidebarOpen,setSidebarOpen]=useState(true);
+      const showToast=(msg,type)=>{setToast({msg,type:type||"success"});setTimeout(()=>setToast(null),3000);};
+
+      const fetchData=useCallback(async(url)=>{
+        const target=url||apiUrl;if(!target)return false;
+        setLoading(true);setError(null);
+        try{
+          const res=await fetch(target+"?action=getAll");const json=await res.json();
+          if(!json.success)throw new Error(json.error||"API Error");
+          const{projects:prj,scurve}=json.data;
+          setProjects(prj||[]);
+          const map={};(scurve||[]).forEach(r=>{if(!map[r.projectId])map[r.projectId]=[];map[r.projectId].push(r);});
+          Object.keys(map).forEach(k=>map[k].sort((a,b)=>a.monthIndex-b.monthIndex));
+          setScurveMap(map);
+          if((prj||[]).length>0)setSelectedId(prev=>prev||prj[0].id);
+          setConnected(true);return true;
+        }catch(err){setError(err.message);setConnected(false);return false;}
+        finally{setLoading(false);}
+      },[apiUrl]);
+
+      const postApi=useCallback(async(body)=>{
+        const res=await fetch(apiUrl,{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify(body)});
+        const json=await res.json();if(!json.success)throw new Error(json.error||"API Error");return json;
+      },[apiUrl]);
+
+      const handleConnect=async(url)=>{
+        const u=url.trim().replace(/\/+$/,"");setApiUrl(u);
+        try{localStorage.setItem(STORAGE_KEY,u);}catch{}
+        const ok=await fetchData(u);if(ok)showToast("เชื่อมต่อ Google Sheets สำเร็จ");};
+
+      useEffect(()=>{if(apiUrl)fetchData(apiUrl);},[]);
+
+      if(!connected)return <SetupView apiUrl={apiUrl} onConnect={handleConnect} loading={loading} error={error}/>;
+
+      const project=projects.find(p=>p.id===selectedId);
+      const scurveData=scurveMap[selectedId]||[];
+
+      return(
+        <div style={{display:"flex",height:"100vh",overflow:"hidden"}}>
+          {toast&&(<div style={{position:"fixed",top:16,right:16,zIndex:999,padding:"12px 20px",borderRadius:10,background:toast.type==="success"?"#065F46":"#7F1D1D",color:"#fff",fontSize:13,fontWeight:500,boxShadow:"0 4px 24px rgba(0,0,0,.4)",animation:"fadeIn .2s ease"}}>{toast.type==="success"?"✓":"✕"} {toast.msg}</div>)}
+
+          <nav style={{width:sidebarOpen?270:0,background:C.nav,display:"flex",flexDirection:"column",borderRight:"1px solid "+C.border,transition:"width .2s",overflow:"hidden",flexShrink:0}}>
+            <div style={{padding:"18px 16px 14px",borderBottom:"1px solid "+C.border,minWidth:270}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div style={{width:32,height:32,borderRadius:8,background:"linear-gradient(135deg,"+C.primary+","+C.accent+")",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:700,color:"#fff"}}>S</div>
+                <div><div style={{fontSize:14,fontWeight:700}}>S-Curve Tracker</div><div style={{fontSize:10,color:C.textMuted}}>Google Sheets Backend</div></div>
+              </div></div>
+
+            <div style={{padding:"12px 10px",flex:1,overflowY:"auto",minWidth:270}}>
+              <div style={{fontSize:10,textTransform:"uppercase",letterSpacing:1.5,color:C.textMuted,padding:"6px 8px 8px"}}>โครงการ ({projects.length})</div>
+              {projects.map(p=>{
+                const sc=scurveMap[p.id]||[];const la=[...sc].reverse().find(d=>d.actual!=null);const ap=la?la.actual:0;const act=p.id===selectedId;
+                return(<div key={p.id} onClick={()=>{setSelectedId(p.id);setView("dashboard");}}
+                  style={{padding:"10px 12px",borderRadius:8,cursor:"pointer",marginBottom:4,background:act?C.primaryDim:"transparent",borderLeft:act?"3px solid "+C.primary:"3px solid transparent"}}>
+                  <div style={{fontSize:10,color:act?C.primary:C.textMuted,marginBottom:1,letterSpacing:0.3}}>{p.id}</div><div style={{fontSize:13,fontWeight:act?700:500,lineHeight:1.4,marginBottom:6,color:act?C.text:"rgba(232,236,244,.75)"}}>{p.name||"(ไม่มีชื่อ)"}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{flex:1,height:3,background:"rgba(255,255,255,.06)",borderRadius:2}}>
+                      <div style={{width:ap+"%",height:"100%",borderRadius:2,background:"linear-gradient(90deg,"+C.actual+","+C.primary+")",transition:"width .3s"}}/></div>
+                    <span style={{fontSize:11,color:C.textMuted,minWidth:32,textAlign:"right"}}>{ap}%</span>
+                  </div></div>);})}
+            </div>
+
+            <div style={{padding:"10px 12px",borderTop:"1px solid "+C.border,minWidth:270}}>
+              <button onClick={()=>setView("add")} style={{width:"100%",padding:9,border:"1px dashed "+C.borderLight,borderRadius:8,background:"transparent",color:C.textMuted,cursor:"pointer",fontSize:13}}>+ เพิ่มโครงการ</button>
+              <button onClick={()=>fetchData()} style={{width:"100%",padding:9,marginTop:6,border:"1px solid "+C.border,borderRadius:8,background:"transparent",color:C.textMuted,cursor:"pointer",fontSize:12,opacity:loading?0.5:1}}>{loading?"กำลังโหลด...":"↻ รีเฟรชข้อมูล"}</button>
+              <button onClick={()=>{try{localStorage.removeItem(STORAGE_KEY);}catch{}setConnected(false);setApiUrl("");}} style={{width:"100%",padding:9,marginTop:6,border:"1px solid rgba(248,113,113,.2)",borderRadius:8,background:"transparent",color:C.danger,cursor:"pointer",fontSize:12}}>✕ ตัดการเชื่อมต่อ</button>
+            </div>
+          </nav>
+
+          <main style={{flex:1,overflowY:"auto",padding:28,background:C.bg}}>
+            <button onClick={()=>setSidebarOpen(!sidebarOpen)} style={{position:"fixed",top:12,left:sidebarOpen?280:10,zIndex:50,width:28,height:28,borderRadius:6,background:C.card,border:"1px solid "+C.border,color:C.textMuted,cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center",transition:"left .2s"}}>{sidebarOpen?"◂":"▸"}</button>
+
+            {view==="dashboard"&&project&&<DashboardView project={project} scurveData={scurveData} onUpdate={()=>setView("update")} onEditPlan={()=>setView("editPlan")}/>}
+            {view==="update"&&project&&<UpdateView project={project} scurveData={scurveData}
+              onSave={async u=>{try{await postApi({action:"updateActual",projectId:project.id,updates:u});await fetchData();showToast("บันทึกผลงานจริงแล้ว");setView("dashboard");}catch(e){showToast(e.message,"error");}}}
+              onCancel={()=>setView("dashboard")}/>}
+            {view==="editPlan"&&project&&<EditPlanView project={project} scurveData={scurveData}
+              onSave={async u=>{try{await postApi({action:"updatePlanned",projectId:project.id,updates:u});await fetchData();showToast("บันทึกแผนงานแล้ว");setView("dashboard");}catch(e){showToast(e.message,"error");}}}
+              onCancel={()=>setView("dashboard")}/>}
+            {view==="add"&&<AddProjectView
+              onSave={async(p,sc)=>{try{const r=await postApi({action:"addProject",project:p,scurveData:sc});await fetchData();setSelectedId(r.projectId||p.id);showToast("เพิ่มโครงการสำเร็จ");setView("dashboard");}catch(e){showToast(e.message,"error");}}}
+              onCancel={()=>setView("dashboard")}/>}
+          </main>
+        </div>);
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
